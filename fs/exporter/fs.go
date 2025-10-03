@@ -86,7 +86,7 @@ func Lutimes(path string, atime time.Time, mtime time.Time) error {
 }
 
 func (p *FSExporter) SetPermissions(ctx context.Context, pathname string, fileinfo *objects.FileInfo) error {
-	if fileinfo.Mode()&os.ModeSymlink == 0 {
+	if fileinfo.Type() != "symlink" {
 		if err := os.Chmod(pathname, fileinfo.Mode()); err != nil {
 			return err
 		}
@@ -102,7 +102,7 @@ func (p *FSExporter) SetPermissions(ctx context.Context, pathname string, filein
 			}
 		}
 	}
-	if fileinfo.Mode()&os.ModeSymlink != 0 {
+	if fileinfo.Type() == "symlink" {
 		if err := Lutimes(pathname, fileinfo.ModTime(), fileinfo.ModTime()); err != nil {
 			return err
 		}
