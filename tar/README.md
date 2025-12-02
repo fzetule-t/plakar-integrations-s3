@@ -16,7 +16,9 @@ The configuration parameters are as follow:
 
 - `location` (required): Path to the TAR archive file
 
-> **Note:** The location can be write directly in the command, with `tar://` prefix. No need to add it in the configuration.
+> **Note:** The location can be write directly in the command, with
+> `tgz:` or `tgz:` prefix, depending on whether the tar to be imported
+> has been compressed or not.  No need to add it in the configuration.
 
 ## Examples
 
