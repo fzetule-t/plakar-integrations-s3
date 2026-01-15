@@ -18,54 +18,50 @@ package exporter
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 
+	"github.com/PlakarKorp/kloset/connectors"
+	"github.com/PlakarKorp/kloset/connectors/exporter"
 	"github.com/PlakarKorp/kloset/location"
 	"github.com/PlakarKorp/kloset/objects"
-	"github.com/PlakarKorp/kloset/snapshot/exporter"
+	"golang.org/x/sync/errgroup"
+	"golang.org/x/sync/singleflight"
 )
 
 type FSExporter struct {
+	opts    *connectors.Options
 	rootDir string
+
+	hlCreate singleflight.Group // key -> ensures canonical exists, returns canonical abs path
+	hlCanon  sync.Map           // key -> canonical abs path string
+	hlMu     sync.Map           // key -> *sync.Mutex (serialize os.Link per key)
 }
 
 func init() {
 	exporter.Register("fs", location.FLAG_LOCALFS, NewFSExporter)
 }
 
-func NewFSExporter(ctx context.Context, opts *exporter.Options, name string, config map[string]string) (exporter.Exporter, error) {
+func NewFSExporter(ctx context.Context, opts *connectors.Options, name string, config map[string]string) (exporter.Exporter, error) {
+	location := config["location"]
+	rootDir := strings.TrimPrefix(location, name+"://")
+
 	return &FSExporter{
-		rootDir: strings.TrimPrefix(config["location"], "fs://"),
+		opts:    opts,
+		rootDir: rootDir,
 	}, nil
 }
 
-func (p *FSExporter) Root(ctx context.Context) (string, error) {
-	return p.rootDir, nil
-}
+func (p *FSExporter) Root() string          { return p.rootDir }
+func (p *FSExporter) Origin() string        { return p.opts.Hostname }
+func (p *FSExporter) Type() string          { return "fs" }
+func (p *FSExporter) Flags() location.Flags { return location.FLAG_LOCALFS }
 
-func (p *FSExporter) CreateDirectory(ctx context.Context, pathname string) error {
-	return os.MkdirAll(pathname, 0700)
-}
-
-func (p *FSExporter) StoreFile(ctx context.Context, pathname string, fp io.Reader, size int64) error {
-	buf := make([]byte, 4<<20) // 4MiB buffer
-
-	f, err := os.Create(pathname)
-	if err != nil {
-		return err
-	}
-
-	if _, err := io.CopyBuffer(f, fp, buf); err != nil {
-		//logging.Warn("copy failure: %s: %s", pathname, err)
-		f.Close()
-		return err
-	}
-
-	if err := f.Close(); err != nil {
-		//logging.Warn("close failure: %s: %s", pathname, err)
-	}
+func (p *FSExporter) Ping(ctx context.Context) error {
 	return nil
 }
 
@@ -76,14 +72,8 @@ func (p *FSExporter) SetPermissions(ctx context.Context, pathname string, filein
 		}
 	}
 	if os.Geteuid() == 0 {
-		if fileinfo.Mode()&os.ModeSymlink != 0 {
-			if err := os.Lchown(pathname, int(fileinfo.Uid()), int(fileinfo.Gid())); err != nil {
-				return err
-			}
-		} else {
-			if err := os.Chown(pathname, int(fileinfo.Uid()), int(fileinfo.Gid())); err != nil {
-				return err
-			}
+		if err := os.Lchown(pathname, int(fileinfo.Uid()), int(fileinfo.Gid())); err != nil {
+			return err
 		}
 	}
 	if fileinfo.Type() == "symlink" {
@@ -95,17 +85,5 @@ func (p *FSExporter) SetPermissions(ctx context.Context, pathname string, filein
 			return err
 		}
 	}
-	return nil
-}
-
-func (p *FSExporter) CreateLink(ctx context.Context, oldname string, newname string, ltype exporter.LinkType) error {
-	if ltype == exporter.HARDLINK {
-		return os.Link(oldname, newname)
-	}
-
-	return os.Symlink(oldname, newname)
-}
-
-func (p *FSExporter) Close(ctx context.Context) error {
 	return nil
 }
