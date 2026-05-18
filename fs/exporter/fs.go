@@ -52,7 +52,7 @@ func NewFSExporter(ctx context.Context, opts *connectors.Options, name string, c
 
 	absRoot, err := filepath.Abs(rootDir)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to absolutify root: %w", err)
 	}
 
 	return &FSExporter{
