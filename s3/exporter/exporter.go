@@ -19,11 +19,14 @@ package exporter
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
+	"log"
 	"net/url"
 	"path"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/PlakarKorp/integrations/s3/common"
 	"github.com/PlakarKorp/kloset/connectors"
@@ -234,28 +237,61 @@ func (p *S3Exporter) Ping(ctx context.Context) error {
 	return nil
 }
 
+// RESTORE
 func (p *S3Exporter) Export(ctx context.Context, records <-chan *connectors.Record, results chan<- *connectors.Result) error {
 	defer close(results)
+	log.Printf("S3Exporter.Export START, maxConcurrency: %d", p.opts.MaxConcurrency)
+	startTime := time.Now()
 
 	g, ctx := errgroup.WithContext(ctx)
 	g.SetLimit(p.opts.MaxConcurrency)
 
+	objectNb := 0
 	for record := range records {
+
 		if record.Err != nil || record.IsXattr || !record.FileInfo.Lmode.IsRegular() {
 			results <- record.Ok()
 			continue
 		}
 
+		objectNb++
 		g.Go(func() error {
-			objname := strings.TrimLeft(path.Join(p.restoreDir, record.Pathname), "/")
+			objname := strings.TrimLeft(p.restoreDir+"/"+record.Pathname, "/")
+			var objectInfo minio.ObjectInfo
+			extendedAttr := record.ExtendedAttributes
+			if len(extendedAttr) > 0 {
+				if err := json.Unmarshal([]byte(extendedAttr[0]), &objectInfo); err != nil {
+					// objectInfo.UserTags = nil
+					// objectInfo.UserMetadata = nil
+					log.Printf("ERROR S3Exporter.Export record.ExtendedAttributes: %v", err)
+				}
+			}
+
 			_, err := p.minioClient.PutObject(ctx, p.bucket, objname,
-				record.Reader, record.FileInfo.Lsize, minio.PutObjectOptions{ServerSideEncryption: p.ssec})
+				record.Reader, record.FileInfo.Lsize, minio.PutObjectOptions{
+					ServerSideEncryption: p.ssec,
+					ContentType:          objectInfo.ContentType,
+					UserTags:             objectInfo.UserTags,
+					UserMetadata:         objectInfo.UserMetadata,
+				})
+
+			if err != nil {
+				log.Printf(
+					"ERROR S3Exporter.Export PutObject: object=%q record=%q size=%d err=%v",
+					objname,
+					record.Pathname,
+					record.FileInfo.Lsize,
+					err,
+				)
+			}
 			results <- record.Error(err)
 			return nil
 		})
 	}
 
-	return g.Wait()
+	result := g.Wait()
+	log.Printf("S3Exporter.Export END, maxConcurrency: %d, objectNb: %d, duration:  %.2f sec", p.opts.MaxConcurrency, objectNb, time.Since(startTime).Seconds())
+	return result
 }
 
 func (p *S3Exporter) Close(ctx context.Context) error {
