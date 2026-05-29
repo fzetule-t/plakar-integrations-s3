@@ -19,7 +19,9 @@ package exporter
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
+	"log"
 	"net/url"
 	"path"
 	"strconv"
@@ -231,20 +233,37 @@ func (p *S3Exporter) Ping(ctx context.Context) error {
 
 func (p *S3Exporter) Export(ctx context.Context, records <-chan *connectors.Record, results chan<- *connectors.Result) error {
 	defer close(results)
+	log.Printf("S3Exporter.Export, maxConcurrency: %d", p.opts.MaxConcurrency)
 
 	g, ctx := errgroup.WithContext(ctx)
 	g.SetLimit(p.opts.MaxConcurrency)
 
 	for record := range records {
+
 		if record.Err != nil || record.IsXattr || !record.FileInfo.Lmode.IsRegular() {
 			results <- record.Ok()
 			continue
 		}
 
 		g.Go(func() error {
-			objname := strings.TrimLeft(path.Join(p.restoreDir, record.Pathname), "/")
+			objname := strings.TrimLeft(p.restoreDir+"/"+record.Pathname, "/")
+			var objectInfo minio.ObjectInfo
+			extendedAttr := record.ExtendedAttributes
+			if len(extendedAttr) > 0 {
+				if err := json.Unmarshal([]byte(extendedAttr[0]), &objectInfo); err != nil {
+					// objectInfo.UserTags = nil
+					// objectInfo.UserMetadata = nil
+					log.Printf("Error record.ExtendedAttributes: %v", err)
+				}
+			}
+
 			_, err := p.minioClient.PutObject(ctx, p.bucket, objname,
-				record.Reader, record.FileInfo.Lsize, minio.PutObjectOptions{ServerSideEncryption: p.ssec})
+				record.Reader, record.FileInfo.Lsize, minio.PutObjectOptions{
+					ServerSideEncryption: p.ssec,
+					ContentType:          objectInfo.ContentType,
+					UserTags:             objectInfo.UserTags,
+					UserMetadata:         objectInfo.UserMetadata,
+				})
 			results <- record.Error(err)
 			return nil
 		})
