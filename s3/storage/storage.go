@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/url"
 	"path"
 	"strconv"
@@ -59,6 +60,7 @@ func init() {
 }
 
 func NewStore(ctx context.Context, proto string, storeConfig map[string]string) (storage.Store, error) {
+	log.Printf("start NewStore")
 	var accessKey string
 	if value, ok := storeConfig["access_key"]; !ok {
 		return nil, fmt.Errorf("missing access_key")
@@ -202,6 +204,7 @@ func NewStore(ctx context.Context, proto string, storeConfig map[string]string) 
 
 	client.SetAppInfo("plakar", "v1.1.0")
 
+	log.Printf("end NewStore")
 	return &Store{
 		minioClient:  client,
 		host:         host,
@@ -228,10 +231,12 @@ func NewStore(ctx context.Context, proto string, storeConfig map[string]string) 
 }
 
 func (s *Store) realpath(path string) string {
+	log.Printf("start realpath")
 	return strings.TrimPrefix(s.prefixDir+path, "/")
 }
 
 func (s *Store) Create(ctx context.Context, config []byte) error {
+	log.Printf("start create")
 	exists, err := s.minioClient.BucketExists(ctx, s.bucket)
 	if err != nil {
 		return fmt.Errorf("check if bucket exists: %w", err)
@@ -269,12 +274,15 @@ func (s *Store) Create(ctx context.Context, config []byte) error {
 		return fmt.Errorf("put object CONFIG: %w", err)
 	}
 
+	log.Printf("end create")
 	return nil
 }
 
 func (s *Store) Open(ctx context.Context) ([]byte, error) {
+	log.Printf("start store.open")
 	exists, err := s.minioClient.BucketExists(ctx, s.bucket)
 	if err != nil {
+		log.Printf("error checking if bucket exists: %v", err)
 		return nil, fmt.Errorf("error checking if bucket exists: %w", err)
 	}
 	if !exists {
@@ -283,19 +291,23 @@ func (s *Store) Open(ctx context.Context) ([]byte, error) {
 
 	object, err := s.minioClient.GetObject(ctx, s.bucket, s.realpath("CONFIG"), minio.GetObjectOptions{ServerSideEncryption: s.ssec})
 	if err != nil {
+		log.Printf("error getting object: %v", err)
 		return nil, fmt.Errorf("error getting object: %w", err)
 	}
 	defer object.Close()
 
 	data, err := io.ReadAll(object)
 	if err != nil {
+		log.Printf("error reading object: %v", err)
 		return nil, fmt.Errorf("error reading object: %w", err)
 	}
 
+	log.Printf("end store.open")
 	return data, nil
 }
 
 func (p *Store) Ping(ctx context.Context) error {
+	log.Printf("start ping")
 	ok, err := p.minioClient.BucketExists(ctx, p.bucket)
 	if err != nil {
 		return err
@@ -303,6 +315,7 @@ func (p *Store) Ping(ctx context.Context) error {
 	if !ok {
 		return fmt.Errorf("bucket does not exist")
 	}
+	log.Printf("end ping")
 	return nil
 }
 
@@ -312,9 +325,11 @@ func (s *Store) Type() string          { return "s3" }
 func (s *Store) Flags() location.Flags { return 0 }
 
 func (s *Store) mode() storage.Mode {
+	log.Printf("start mode")
 	if s.storageClass == "GLACIER" || s.storageClass == "DEEP_ARCHIVE" {
 		return storage.ModeWrite
 	}
+	log.Printf("end mode")
 	return storage.ModeRead | storage.ModeWrite
 }
 
@@ -327,6 +342,7 @@ func (s *Store) Size(ctx context.Context) (int64, error) {
 }
 
 func (s *Store) List(ctx context.Context, res storage.StorageResource) ([]objects.MAC, error) {
+	log.Printf("start list")
 	var prefix string
 	var prefixSize int
 
@@ -360,10 +376,12 @@ func (s *Store) List(ctx context.Context, res storage.StorageResource) ([]object
 			ret = append(ret, objects.MAC(t))
 		}
 	}
+	log.Printf("end list")
 	return ret, nil
 }
 
 func (s *Store) Put(ctx context.Context, res storage.StorageResource, mac objects.MAC, rd io.Reader) (int64, error) {
+	log.Printf("start put")
 	switch res {
 	case storage.StorageResourcePackfile:
 		buf := s.bufPool.Get().(*bytes.Buffer)
@@ -400,10 +418,12 @@ func (s *Store) Put(ctx context.Context, res storage.StorageResource, mac object
 		return info.Size, nil
 	}
 
+	log.Printf("end put")
 	return -1, errors.ErrUnsupported
 }
 
 func (s *Store) Get(ctx context.Context, res storage.StorageResource, mac objects.MAC, rg *storage.Range) (io.ReadCloser, error) {
+	log.Printf("start get")
 	var path string
 	switch res {
 	case storage.StorageResourcePackfile:
@@ -425,10 +445,12 @@ func (s *Store) Get(ctx context.Context, res storage.StorageResource, mac object
 		return reading.NewSectionReadCloser(object, int64(rg.Offset), int64(rg.Length)), nil
 	}
 
+	log.Printf("end get")
 	return object, nil
 }
 
 func (s *Store) Delete(ctx context.Context, res storage.StorageResource, mac objects.MAC) error {
+	log.Printf("start Delete")
 	var path string
 	switch res {
 	case storage.StorageResourcePackfile:
@@ -443,9 +465,12 @@ func (s *Store) Delete(ctx context.Context, res storage.StorageResource, mac obj
 	if err != nil {
 		return fmt.Errorf("remove %s object: %w", res, err)
 	}
+
+	log.Printf("end Delete")
 	return nil
 }
 
 func (s *Store) Close(ctx context.Context) error {
+	log.Printf("end close")
 	return nil
 }
