@@ -84,7 +84,7 @@ func (p *FSExporter) SetPermissions(ctx context.Context, pathname string, filein
 	}
 	if os.Geteuid() == 0 {
 		if err := os.Lchown(pathname, int(fileinfo.Uid()), int(fileinfo.Gid())); err != nil {
-			return err
+			return fmt.Errorf("chown(%s): %w", pathname, err)
 		}
 	}
 	if fileinfo.Type() == "symlink" {
