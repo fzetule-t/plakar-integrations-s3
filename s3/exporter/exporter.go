@@ -21,13 +21,11 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/url"
 	"path"
 	"strconv"
 	"strings"
 
-	"github.com/PlakarKorp/integration-s3/common"
 	"github.com/PlakarKorp/kloset/connectors"
 	"github.com/PlakarKorp/kloset/connectors/exporter"
 	"github.com/PlakarKorp/kloset/location"
@@ -160,7 +158,7 @@ func NewS3Exporter(ctx context.Context, opts *connectors.Options, name string, c
 			return nil, fmt.Errorf("missing endpoint when virtual_host=true")
 		}
 
-		bucket, host, err = common.SplitVirtualHost(parsed.Host, endpoint)
+		bucket, host, err = SplitVirtualHost(parsed.Host, endpoint)
 		if err != nil {
 			return nil, err
 		}
@@ -230,14 +228,12 @@ func (p *S3Exporter) Ping(ctx context.Context) error {
 }
 
 func (p *S3Exporter) Export(ctx context.Context, records <-chan *connectors.Record, results chan<- *connectors.Result) error {
-	log.Printf("Start export")
 	defer close(results)
 
 	g, ctx := errgroup.WithContext(ctx)
 	g.SetLimit(p.opts.MaxConcurrency)
 
 	for record := range records {
-		log.Printf("Start record")
 		if record.Err != nil || record.IsXattr || !record.FileInfo.Lmode.IsRegular() {
 			results <- record.Ok()
 			continue
@@ -250,7 +246,6 @@ func (p *S3Exporter) Export(ctx context.Context, records <-chan *connectors.Reco
 				if err := json.Unmarshal([]byte(record.ExtendedAttributes[0]), &objectInfo); err != nil {
 					objectInfo.UserTags = nil
 					objectInfo.UserMetadata = nil
-					log.Printf("Error record.ExtendedAttributes: %v", err)
 				}
 			}
 
@@ -261,20 +256,12 @@ func (p *S3Exporter) Export(ctx context.Context, records <-chan *connectors.Reco
 					UserTags:             objectInfo.UserTags,
 					UserMetadata:         objectInfo.UserMetadata,
 				})
-
-			if err != nil {
-				log.Printf("Error p.minioClient.PutObject: %v", err)
-			}
 			results <- record.Error(err)
-			log.Printf("End record")
 			return nil
 		})
 	}
 
-	log.Printf("Start wait")
-	resultWait := g.Wait()
-	log.Printf("End export")
-	return resultWait
+	return g.Wait()
 }
 
 func (p *S3Exporter) Close(ctx context.Context) error {
