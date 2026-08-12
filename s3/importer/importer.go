@@ -237,8 +237,10 @@ func (p *S3Importer) Import(ctx context.Context, records chan<- *connectors.Reco
 			continue
 		}
 
+		key := object.Key
+
 		fi := objects.FileInfo{
-			Lname:    path.Base("/" + object.Key),
+			Lname:    path.Base("/" + key),
 			Lsize:    object.Size,
 			Lmode:    0o700,
 			LmodTime: object.LastModified,
@@ -246,19 +248,47 @@ func (p *S3Importer) Import(ctx context.Context, records chan<- *connectors.Reco
 		}
 
 		var xattr []string
-		obj, err := p.minioClient.GetObject(ctx, p.bucket, object.Key, minio.GetObjectOptions{ServerSideEncryption: p.ssec})
-		if err == nil {
-			if stat, err := obj.Stat(); err == nil {
-				xattrStr, err := json.Marshal(stat)
-				if err == nil {
-					xattr = append(xattr, string(xattrStr))
-				}
+		recordErr := error(nil)
+
+		stat, statErr := p.minioClient.StatObject(
+			ctx,
+			p.bucket,
+			key,
+			minio.StatObjectOptions{
+				ServerSideEncryption: p.ssec,
+			},
+		)
+
+		if statErr != nil {
+			recordErr = statErr
+		} else {
+			if xattrBytes, marshalErr := json.Marshal(stat); marshalErr == nil {
+				xattr = append(xattr, string(xattrBytes))
 			}
 		}
 
-		records <- connectors.NewRecord("/"+object.Key, "", fi, xattr, func() (io.ReadCloser, error) {
-			return obj, err
-		})
+		records <- connectors.NewRecord(
+			"/"+key,
+			"",
+			fi,
+			xattr,
+			func() (io.ReadCloser, error) {
+				if recordErr != nil {
+					return nil, recordErr
+				}
+
+				obj, getObjectErr := p.minioClient.GetObject(
+					ctx,
+					p.bucket,
+					key,
+					minio.GetObjectOptions{
+						ServerSideEncryption: p.ssec,
+					},
+				)
+
+				return obj, getObjectErr
+			},
+		)
 	}
 
 	return err
