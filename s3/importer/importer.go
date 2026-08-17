@@ -22,10 +22,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/url"
 	"path"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
@@ -224,15 +227,99 @@ func (p *S3Importer) Import(ctx context.Context, records chan<- *connectors.Reco
 		Prefix:    strings.TrimPrefix(p.scanDir, "/"),
 		Recursive: true,
 	}
-	var err error
+
+	const statWorkers = 16
+
+	type statJob struct {
+		key string
+		fi  objects.FileInfo
+	}
+
+	jobs := make(chan statJob, statWorkers*2)
+
+	var workers sync.WaitGroup
+
+	// StatObject worker pool.
+	for i := 0; i < statWorkers; i++ {
+		workers.Add(1)
+
+		go func() {
+			defer workers.Done()
+
+			for job := range jobs {
+				// Stop accepting more work if the context was cancelled.
+				select {
+				case <-ctx.Done():
+					return
+				default:
+				}
+
+				var xattr []string
+				var recordErr error
+
+				start := time.Now()
+				stat, statErr := p.minioClient.StatObject(
+					ctx,
+					p.bucket,
+					job.key,
+					minio.StatObjectOptions{
+						ServerSideEncryption: p.ssec,
+					},
+				)
+				duration := time.Since(start)
+				if statErr != nil {
+					log.Printf("StatObject FAILED key=%s duration=%s err=%v", job.key, duration, statErr)
+					recordErr = statErr
+				} else if xattrBytes, marshalErr := json.Marshal(stat); marshalErr == nil {
+					log.Printf("StatObject OK key=%s duration=%s", job.key, duration)
+					xattr = append(xattr, string(xattrBytes))
+				}
+
+				key := job.key
+				recordErrForGet := recordErr
+
+				record := connectors.NewRecord(
+					"/"+key,
+					"",
+					job.fi,
+					xattr,
+					func() (io.ReadCloser, error) {
+						if recordErrForGet != nil {
+							return nil, recordErrForGet
+						}
+
+						obj, getObjectErr := p.minioClient.GetObject(
+							ctx,
+							p.bucket,
+							key,
+							minio.GetObjectOptions{
+								ServerSideEncryption: p.ssec,
+							},
+						)
+
+						return obj, getObjectErr
+					},
+				)
+
+				// Send the record as soon as this StatObject finishes.
+				select {
+				case records <- record:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}()
+	}
+
+	var listErr error
+
 	for object := range p.minioClient.ListObjects(ctx, p.bucket, listopts) {
 		if object.Err != nil {
-			err = object.Err
-			continue // per documentation, we have to drain the channel
+			listErr = object.Err
+			continue // Must drain ListObjects.
 		}
 
-		// Some backend actually return _folders_, which they
-		// shouldn't so just skip over those.
+		// Some backends incorrectly return folders.
 		if strings.HasSuffix(object.Key, "/") {
 			continue
 		}
@@ -247,51 +334,26 @@ func (p *S3Importer) Import(ctx context.Context, records chan<- *connectors.Reco
 			Ldev:     1,
 		}
 
-		var xattr []string
-		recordErr := error(nil)
-
-		stat, statErr := p.minioClient.StatObject(
-			ctx,
-			p.bucket,
-			key,
-			minio.StatObjectOptions{
-				ServerSideEncryption: p.ssec,
-			},
-		)
-
-		if statErr != nil {
-			recordErr = statErr
-		} else {
-			if xattrBytes, marshalErr := json.Marshal(stat); marshalErr == nil {
-				xattr = append(xattr, string(xattrBytes))
-			}
+		select {
+		case jobs <- statJob{
+			key: key,
+			fi:  fi,
+		}:
+		case <-ctx.Done():
+			close(jobs)
+			workers.Wait()
+			return ctx.Err()
 		}
-
-		records <- connectors.NewRecord(
-			"/"+key,
-			"",
-			fi,
-			xattr,
-			func() (io.ReadCloser, error) {
-				if recordErr != nil {
-					return nil, recordErr
-				}
-
-				obj, getObjectErr := p.minioClient.GetObject(
-					ctx,
-					p.bucket,
-					key,
-					minio.GetObjectOptions{
-						ServerSideEncryption: p.ssec,
-					},
-				)
-
-				return obj, getObjectErr
-			},
-		)
 	}
 
-	return err
+	close(jobs)
+	workers.Wait()
+
+	if listErr != nil {
+		return listErr
+	}
+
+	return nil
 }
 
 func (p *S3Importer) Close(ctx context.Context) error {
