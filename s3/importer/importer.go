@@ -24,15 +24,17 @@ import (
 	"io"
 	"log"
 	"net/url"
+	"os"
 	"path"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
 	"github.com/minio/minio-go/v7/pkg/encrypt"
+	"golang.org/x/sys/unix"
 
 	"github.com/PlakarKorp/kloset/connectors"
 	"github.com/PlakarKorp/kloset/connectors/importer"
@@ -43,10 +45,11 @@ import (
 type S3Importer struct {
 	minioClient *minio.Client
 
-	bucket  string
-	host    string
-	scanDir string
-	ssec    encrypt.ServerSide
+	bucket       string
+	host         string
+	scanDir      string
+	includePaths []string
+	ssec         encrypt.ServerSide
 }
 
 func init() {
@@ -79,6 +82,16 @@ func connect(endpoint string, useSsl, insecure bool, accessKeyID, secretAccessKe
 
 func NewS3Importer(ctx context.Context, opts *connectors.Options, name string, config map[string]string) (importer.Importer, error) {
 	target := config["location"]
+
+	includePathsStr, ok := config["includePaths"]
+
+	var includePaths []string
+	if ok && includePathsStr != "" {
+		for _, path := range strings.Split(includePathsStr, ",") {
+			includePaths = append(includePaths, strings.TrimSpace(path))
+		}
+		log.Printf("NewS3Importer - includePaths: %v", includePaths)
+	}
 
 	var accessKey string
 	if tmp, ok := config["access_key"]; !ok {
@@ -196,11 +209,12 @@ func NewS3Importer(ctx context.Context, opts *connectors.Options, name string, c
 	}
 
 	return &S3Importer{
-		bucket:      bucket,
-		scanDir:     scanDir,
-		minioClient: conn,
-		host:        host,
-		ssec:        ssec,
+		bucket:       bucket,
+		scanDir:      scanDir,
+		includePaths: includePaths,
+		minioClient:  conn,
+		host:         host,
+		ssec:         ssec,
 	}, nil
 }
 
@@ -222,11 +236,6 @@ func (p *S3Importer) Ping(ctx context.Context) error {
 
 func (p *S3Importer) Import(ctx context.Context, records chan<- *connectors.Record, results <-chan *connectors.Result) error {
 	defer close(records)
-
-	listopts := minio.ListObjectsOptions{
-		Prefix:    strings.TrimPrefix(p.scanDir, "/"),
-		Recursive: true,
-	}
 
 	const statWorkers = 16
 
@@ -257,7 +266,6 @@ func (p *S3Importer) Import(ctx context.Context, records chan<- *connectors.Reco
 				var xattr []string
 				var recordErr error
 
-				start := time.Now()
 				stat, statErr := p.minioClient.StatObject(
 					ctx,
 					p.bucket,
@@ -266,12 +274,12 @@ func (p *S3Importer) Import(ctx context.Context, records chan<- *connectors.Reco
 						ServerSideEncryption: p.ssec,
 					},
 				)
-				duration := time.Since(start)
+
 				if statErr != nil {
-					log.Printf("StatObject FAILED key=%s duration=%s err=%v", job.key, duration, statErr)
+					log.Printf("StatObject FAILED key=%s err=%v", job.key, statErr)
 					recordErr = statErr
 				} else if xattrBytes, marshalErr := json.Marshal(stat); marshalErr == nil {
-					log.Printf("StatObject OK key=%s duration=%s", job.key, duration)
+					log.Printf("StatObject OK key=%s", job.key)
 					xattr = append(xattr, string(xattrBytes))
 				}
 
@@ -288,7 +296,7 @@ func (p *S3Importer) Import(ctx context.Context, records chan<- *connectors.Reco
 							return nil, recordErrForGet
 						}
 
-						obj, getObjectErr := p.minioClient.GetObject(
+						return p.minioClient.GetObject(
 							ctx,
 							p.bucket,
 							key,
@@ -296,8 +304,6 @@ func (p *S3Importer) Import(ctx context.Context, records chan<- *connectors.Reco
 								ServerSideEncryption: p.ssec,
 							},
 						)
-
-						return obj, getObjectErr
 					},
 				)
 
@@ -311,38 +317,63 @@ func (p *S3Importer) Import(ctx context.Context, records chan<- *connectors.Reco
 		}()
 	}
 
+	prefixes := p.includePaths
+	if len(prefixes) == 0 {
+		prefixes = []string{p.scanDir}
+	}
+
 	var listErr error
 
-	for object := range p.minioClient.ListObjects(ctx, p.bucket, listopts) {
-		if object.Err != nil {
-			listErr = object.Err
-			continue // Must drain ListObjects.
+	pid := os.Getpid()
+	tid := unix.Gettid()
+	stack := string(debug.Stack())
+
+	for _, line := range strings.Split(strings.TrimRight(stack, "\n"), "\n") {
+		log.Printf("[PID=%d TID=%d] %s\n", pid, tid, line)
+	}
+
+	for _, prefix := range prefixes {
+		prefix = strings.Trim(prefix, "/")
+		if prefix != "" {
+			prefix += "/"
 		}
 
-		// Some backends incorrectly return folders.
-		if strings.HasSuffix(object.Key, "/") {
-			continue
+		listopts := minio.ListObjectsOptions{
+			Prefix:    prefix,
+			Recursive: true,
 		}
+		log.Printf("ListObjectsOptions.prefix: %s, recursive: %t", listopts.Prefix, listopts.Recursive)
 
-		key := object.Key
+		for object := range p.minioClient.ListObjects(ctx, p.bucket, listopts) {
+			if object.Err != nil {
+				listErr = object.Err
+				continue
+			}
 
-		fi := objects.FileInfo{
-			Lname:    path.Base("/" + key),
-			Lsize:    object.Size,
-			Lmode:    0o700,
-			LmodTime: object.LastModified,
-			Ldev:     1,
-		}
+			if strings.HasSuffix(object.Key, "/") {
+				continue
+			}
 
-		select {
-		case jobs <- statJob{
-			key: key,
-			fi:  fi,
-		}:
-		case <-ctx.Done():
-			close(jobs)
-			workers.Wait()
-			return ctx.Err()
+			key := object.Key
+
+			fi := objects.FileInfo{
+				Lname:    path.Base("/" + key),
+				Lsize:    object.Size,
+				Lmode:    0o700,
+				LmodTime: object.LastModified,
+				Ldev:     1,
+			}
+
+			select {
+			case jobs <- statJob{
+				key: key,
+				fi:  fi,
+			}:
+			case <-ctx.Done():
+				close(jobs)
+				workers.Wait()
+				return ctx.Err()
+			}
 		}
 	}
 
