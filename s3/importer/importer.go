@@ -235,6 +235,7 @@ func (p *S3Importer) Ping(ctx context.Context) error {
 
 func (p *S3Importer) Import(ctx context.Context, records chan<- *connectors.Record, results <-chan *connectors.Result) error {
 	defer close(records)
+	log.Printf("S3Exporter.Import")
 
 	const statWorkers = 16
 
@@ -248,7 +249,7 @@ func (p *S3Importer) Import(ctx context.Context, records chan<- *connectors.Reco
 	var workers sync.WaitGroup
 
 	// StatObject worker pool.
-	for i := 0; i < statWorkers; i++ {
+	for range statWorkers {
 		workers.Add(1)
 
 		go func() {
