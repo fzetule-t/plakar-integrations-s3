@@ -24,9 +24,7 @@ import (
 	"io"
 	"log"
 	"net/url"
-	"os"
 	"path"
-	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -34,7 +32,6 @@ import (
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
 	"github.com/minio/minio-go/v7/pkg/encrypt"
-	"golang.org/x/sys/unix"
 
 	"github.com/PlakarKorp/kloset/connectors"
 	"github.com/PlakarKorp/kloset/connectors/importer"
@@ -323,14 +320,6 @@ func (p *S3Importer) Import(ctx context.Context, records chan<- *connectors.Reco
 	}
 
 	var listErr error
-
-	pid := os.Getpid()
-	tid := unix.Gettid()
-	stack := string(debug.Stack())
-
-	for _, line := range strings.Split(strings.TrimRight(stack, "\n"), "\n") {
-		log.Printf("[PID=%d TID=%d] %s\n", pid, tid, line)
-	}
 
 	for _, prefix := range prefixes {
 		prefix = strings.Trim(prefix, "/")
