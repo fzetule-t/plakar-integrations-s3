@@ -27,6 +27,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/PlakarKorp/integrations/s3/common"
 	"github.com/PlakarKorp/kloset/connectors"
 	"github.com/PlakarKorp/kloset/connectors/exporter"
 	"github.com/PlakarKorp/kloset/location"
@@ -161,7 +162,7 @@ func NewS3Exporter(ctx context.Context, opts *connectors.Options, name string, c
 			return nil, fmt.Errorf("missing endpoint when virtual_host=true")
 		}
 
-		bucket, host, err = SplitVirtualHost(parsed.Host, endpoint)
+		bucket, host, err = common.SplitVirtualHost(parsed.Host, endpoint)
 		if err != nil {
 			return nil, err
 		}

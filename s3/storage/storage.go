@@ -29,6 +29,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/PlakarKorp/integrations/s3/common"
 	"github.com/PlakarKorp/kloset/connectors/storage"
 	"github.com/PlakarKorp/kloset/location"
 	"github.com/PlakarKorp/kloset/objects"
@@ -142,7 +143,7 @@ func NewStore(ctx context.Context, proto string, storeConfig map[string]string) 
 			return nil, fmt.Errorf("missing endpoint when virtual_host=true")
 		}
 
-		bucket, host, err = SplitVirtualHost(u.Host, endpoint)
+		bucket, host, err = common.SplitVirtualHost(u.Host, endpoint)
 		if err != nil {
 			return nil, err
 		}
@@ -497,7 +498,7 @@ func (s *Store) Get(ctx context.Context, res storage.StorageResource, mac object
 		expected = int64(rg.Length)
 	}
 
-	return NewRetryReader(ctx, expected, func(offset int64) (io.ReadCloser, error) {
+	return common.NewRetryReader(ctx, expected, func(offset int64) (io.ReadCloser, error) {
 		opts := minio.GetObjectOptions{ServerSideEncryption: s.ssec}
 		if rg != nil {
 			start := int64(rg.Offset) + offset
