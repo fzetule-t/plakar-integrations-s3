@@ -258,7 +258,7 @@ func (p *S3Exporter) Export(ctx context.Context, records <-chan *connectors.Reco
 				if err := json.Unmarshal([]byte(extendedAttr[0]), &objectInfo); err != nil {
 					// objectInfo.UserTags = nil
 					// objectInfo.UserMetadata = nil
-					log.Printf("Error record.ExtendedAttributes: %v", err)
+					log.Printf("ERROR S3Exporter.Export record.ExtendedAttributes: %v", err)
 				}
 			}
 
@@ -269,13 +269,18 @@ func (p *S3Exporter) Export(ctx context.Context, records <-chan *connectors.Reco
 					UserTags:             objectInfo.UserTags,
 					UserMetadata:         objectInfo.UserMetadata,
 				})
+
+			if err != nil {
+				log.Printf("ERROR S3Exporter.Export PutObject, %v", err)
+			}
 			results <- record.Error(err)
 			return nil
 		})
 	}
 
+	result := g.Wait()
 	log.Printf("S3Exporter.Export END, maxConcurrency: %d, objectNb: %d, duration:  %.2f sec", p.opts.MaxConcurrency, objectNb, time.Since(startTime).Seconds())
-	return g.Wait()
+	return result
 }
 
 func (p *S3Exporter) Close(ctx context.Context) error {
