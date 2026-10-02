@@ -26,6 +26,7 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/PlakarKorp/integrations/s3/common"
 	"github.com/PlakarKorp/kloset/connectors"
@@ -231,13 +232,16 @@ func (p *S3Exporter) Ping(ctx context.Context) error {
 	return nil
 }
 
+// RESTORE
 func (p *S3Exporter) Export(ctx context.Context, records <-chan *connectors.Record, results chan<- *connectors.Result) error {
 	defer close(results)
-	log.Printf("S3Exporter.Export, maxConcurrency: %d", p.opts.MaxConcurrency)
+	log.Printf("S3Exporter.Export START, maxConcurrency: %d", p.opts.MaxConcurrency)
+	startTime := time.Now()
 
 	g, ctx := errgroup.WithContext(ctx)
 	g.SetLimit(p.opts.MaxConcurrency)
 
+	objectNb := 0
 	for record := range records {
 
 		if record.Err != nil || record.IsXattr || !record.FileInfo.Lmode.IsRegular() {
@@ -245,6 +249,7 @@ func (p *S3Exporter) Export(ctx context.Context, records <-chan *connectors.Reco
 			continue
 		}
 
+		objectNb++
 		g.Go(func() error {
 			objname := strings.TrimLeft(p.restoreDir+"/"+record.Pathname, "/")
 			var objectInfo minio.ObjectInfo
@@ -269,6 +274,7 @@ func (p *S3Exporter) Export(ctx context.Context, records <-chan *connectors.Reco
 		})
 	}
 
+	log.Printf("S3Exporter.Export END, maxConcurrency: %d, objectNb: %d, duration:  %.2f sec", p.opts.MaxConcurrency, objectNb, time.Since(startTime).Seconds())
 	return g.Wait()
 }
 

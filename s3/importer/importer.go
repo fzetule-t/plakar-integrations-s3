@@ -28,6 +28,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
@@ -234,85 +235,86 @@ func (p *S3Importer) Ping(ctx context.Context) error {
 	return nil
 }
 
+// BACKUP
 func (p *S3Importer) Import(ctx context.Context, records chan<- *connectors.Record, results <-chan *connectors.Result) error {
 	defer close(records)
-	log.Printf("S3Exporter.Import")
-
-	const statWorkers = 16
+	const statWorkerNb = 16
+	log.Printf("S3Importer.Import START, statWorkerNb: %d", statWorkerNb)
+	startTime := time.Now()
 
 	type statJob struct {
 		key string
 		fi  objects.FileInfo
 	}
 
-	jobs := make(chan statJob, statWorkers*2)
+	jobs := make(chan statJob, statWorkerNb*2)
 
 	var workers sync.WaitGroup
+	workers.Add(statWorkerNb)
 
 	// StatObject worker pool.
-	for range statWorkers {
-		workers.Add(1)
-
+	for range statWorkerNb {
 		go func() {
 			defer workers.Done()
 
-			for job := range jobs {
-				// Stop accepting more work if the context was cancelled.
+			for {
 				select {
 				case <-ctx.Done():
 					return
-				default:
-				}
 
-				var xattr []string
-				var recordErr error
+				case job, ok := <-jobs:
+					if !ok {
+						return
+					}
 
-				stat, statErr := p.minioClient.StatObject(
-					ctx,
-					p.bucket,
-					job.key,
-					minio.StatObjectOptions{
-						ServerSideEncryption: p.ssec,
-					},
-				)
+					stat, err := p.minioClient.StatObject(
+						ctx,
+						p.bucket,
+						job.key,
+						minio.StatObjectOptions{
+							ServerSideEncryption: p.ssec,
+						},
+					)
 
-				if statErr != nil {
-					log.Printf("StatObject FAILED key=%s err=%v", job.key, statErr)
-					recordErr = statErr
-				} else if xattrBytes, marshalErr := json.Marshal(stat); marshalErr == nil {
-					log.Printf("StatObject OK key=%s", job.key)
-					xattr = append(xattr, string(xattrBytes))
-				}
-
-				key := job.key
-				recordErrForGet := recordErr
-
-				record := connectors.NewRecord(
-					"/"+key,
-					"",
-					job.fi,
-					xattr,
-					func() (io.ReadCloser, error) {
-						if recordErrForGet != nil {
-							return nil, recordErrForGet
+					var xattr []string
+					if err != nil {
+						log.Printf("StatObject FAILED key=%s err=%v", job.key, err)
+					} else {
+						// log.Printf("StatObject OK key=%s", job.key)
+						if b, marshalErr := json.Marshal(stat); marshalErr == nil {
+							xattr = []string{string(b)}
 						}
+					}
 
-						return p.minioClient.GetObject(
-							ctx,
-							p.bucket,
-							key,
-							minio.GetObjectOptions{
-								ServerSideEncryption: p.ssec,
-							},
-						)
-					},
-				)
+					key := job.key
+					recordErr := err
 
-				// Send the record as soon as this StatObject finishes.
-				select {
-				case records <- record:
-				case <-ctx.Done():
-					return
+					record := connectors.NewRecord(
+						"/"+key,
+						"",
+						job.fi,
+						xattr,
+						func() (io.ReadCloser, error) {
+							if recordErr != nil {
+								return nil, recordErr
+							}
+
+							return p.minioClient.GetObject(
+								ctx,
+								p.bucket,
+								key,
+								minio.GetObjectOptions{
+									ServerSideEncryption: p.ssec,
+								},
+							)
+						},
+					)
+
+					select {
+					case records <- record:
+					case <-ctx.Done():
+						return
+					}
 				}
 			}
 		}()
@@ -325,6 +327,7 @@ func (p *S3Importer) Import(ctx context.Context, records chan<- *connectors.Reco
 
 	var listErr error
 
+	objectNb := 0
 	for _, prefix := range prefixes {
 		prefix = strings.Trim(prefix, "/")
 		if prefix != "" {
@@ -335,7 +338,12 @@ func (p *S3Importer) Import(ctx context.Context, records chan<- *connectors.Reco
 			Prefix:    prefix,
 			Recursive: true,
 		}
-		log.Printf("ListObjectsOptions.prefix: %s, recursive: %t", listopts.Prefix, listopts.Recursive)
+
+		log.Printf(
+			"S3Importer.Import.ListObjectsOptions.prefix: %s, recursive: %t",
+			listopts.Prefix,
+			listopts.Recursive,
+		)
 
 		for object := range p.minioClient.ListObjects(ctx, p.bucket, listopts) {
 			if object.Err != nil {
@@ -347,19 +355,18 @@ func (p *S3Importer) Import(ctx context.Context, records chan<- *connectors.Reco
 				continue
 			}
 
-			key := object.Key
-
 			fi := objects.FileInfo{
-				Lname:    path.Base("/" + key),
+				Lname:    path.Base("/" + object.Key),
 				Lsize:    object.Size,
 				Lmode:    0o700,
 				LmodTime: object.LastModified,
 				Ldev:     1,
 			}
+			objectNb++
 
 			select {
 			case jobs <- statJob{
-				key: key,
+				key: object.Key,
 				fi:  fi,
 			}:
 			case <-ctx.Done():
@@ -372,6 +379,8 @@ func (p *S3Importer) Import(ctx context.Context, records chan<- *connectors.Reco
 
 	close(jobs)
 	workers.Wait()
+
+	log.Printf("S3Importer.Import END, statWorkerNb: %d, objectNb: %d, duration:  %.2f sec", statWorkerNb, objectNb, time.Since(startTime).Seconds())
 
 	if listErr != nil {
 		return listErr
