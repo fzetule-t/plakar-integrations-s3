@@ -271,7 +271,13 @@ func (p *S3Exporter) Export(ctx context.Context, records <-chan *connectors.Reco
 				})
 
 			if err != nil {
-				log.Printf("ERROR S3Exporter.Export PutObject, %v", err)
+				log.Printf(
+					"ERROR S3Exporter.Export PutObject: object=%q record=%q size=%d err=%+v",
+					objname,
+					record.Pathname,
+					record.FileInfo.Lsize,
+					err,
+				)
 			}
 			results <- record.Error(err)
 			return nil
